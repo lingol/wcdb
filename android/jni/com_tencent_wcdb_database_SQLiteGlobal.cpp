@@ -21,9 +21,11 @@
 #include "JNIHelp.h"
 #include "Logger.h"
 #include "ModuleLoader.h"
+#include "SQLiteCommon.h"
 #include "fts/mm_fts.h"
 
-// Forward declaration from vfslog.c
+// Forward declarations
+extern "C" void sqlcipher_set_default_pagesize(int);
 extern "C" int sqlite3_register_vfslog(const char *);
 extern volatile uint32_t vlogDefaultLogFlags;
 
@@ -40,7 +42,7 @@ extern volatile int sLastErrorLine;
 static void sqliteLogCallback(void *data, int iErrCode, const char *zMsg)
 {
     // Extract line number for specific error codes.
-    const char *pattern = NULL;
+    const char *pattern = nullptr;
     int priority = ANDROID_LOG_WARN;
     switch (iErrCode & 0xFF) {
         case SQLITE_NOTICE:
@@ -94,7 +96,7 @@ static void sqliteInitialize()
     sqlite3_soft_heap_limit(SOFT_HEAP_LIMIT);
 
     // Register vfslog VFS.
-    sqlite3_register_vfslog(NULL);
+    sqlite3_register_vfslog(nullptr);
 
     // Initialize SQLite.
     sqlite3_initialize();
@@ -105,20 +107,27 @@ static jint nativeReleaseMemory(JNIEnv *env, jclass clazz)
     return sqlite3_release_memory(SOFT_HEAP_LIMIT);
 }
 
-static void nativeTestJNIRegistration(JNIEnv *env, jclass clazz)
+static void nativeSetDefaultPageSize(JNIEnv *env, jclass clazz, jint pageSize)
 {
-    // do nothing
+    sqlcipher_set_default_pagesize(pageSize);
 }
 
 static JNINativeMethod sMethods[] = {
     /* name, signature, funcPtr */
     {"nativeReleaseMemory", "()I", (void *) nativeReleaseMemory},
-    {"nativeTestJNIRegistration", "()V", (void *) nativeTestJNIRegistration},
+    {"nativeSetDefaultPageSize", "(I)V", (void *) nativeSetDefaultPageSize},
 };
 
 static int register_wcdb_SQLiteGlobal(JavaVM *vm, JNIEnv *env)
 {
     sqliteInitialize();
+
+    jclass clazz;
+    FIND_CLASS(clazz, "com/tencent/wcdb/database/WCDBInitializationProbe");
+
+    jfieldID fidLibLoaded = env->GetStaticFieldID(clazz, "libLoaded", "Z");
+    env->SetStaticBooleanField(clazz, fidLibLoaded, JNI_TRUE);
+    env->DeleteLocalRef(clazz);
 
     return jniRegisterNativeMethods(env,
                                     "com/tencent/wcdb/database/SQLiteGlobal",

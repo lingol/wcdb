@@ -3,12 +3,12 @@ apply plugin: 'maven-publish'
 
 
 android {
-    compileSdkVersion 25
-    buildToolsVersion '25.0.2'
+    compileSdkVersion 26
+    buildToolsVersion '26.0.3'
 
     defaultConfig {
-        minSdkVersion 12
-        targetSdkVersion 25
+        minSdkVersion 14
+        targetSdkVersion 26
         versionCode 1
         versionName rootProject.VERSION
 
@@ -17,7 +17,12 @@ android {
                 abiFilters 'armeabi', 'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'
                 arguments '-j2'
 
-                def hasBuildInfo = false;
+                if (rootProject.hasProperty("USE_GCC")) {
+                    if (rootProject.USE_GCC == '1')
+                        arguments.add('USE_GCC=1')
+                }
+
+                def hasBuildInfo = false
                 if (rootProject.hasProperty("WX_BUILD_REVISION"))
                     hasBuildInfo = arguments.add('WX_BUILD_REVISION=\'' + rootProject.WX_BUILD_REVISION + '\'')
                 if (rootProject.hasProperty("WX_BUILD_BRANCH"))
@@ -64,15 +69,10 @@ android {
     }
 
     defaultPublishConfig 'release'
-    publishNonDefault true
 
     lintOptions {
         disable 'OldTargetApi', 'GradleDependency'
     }
-}
-
-dependencies {
-    compile fileTree(dir: 'libs', include: ['*.jar'])
 }
 
 android.libraryVariants.all { variant ->

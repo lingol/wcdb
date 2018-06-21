@@ -80,6 +80,7 @@ public final class SQLiteConnectionPool implements Closeable {
 
     // Keep reference to SQLiteDatabase which owns this connection pool.
     private final WeakReference<SQLiteDatabase> mDB;
+    private volatile SQLiteChangeListener mChangeListener;
     private volatile SQLiteTrace mTraceCallback;
     private volatile SQLiteCheckpointListener mCheckpointListener;
 
@@ -120,6 +121,10 @@ public final class SQLiteConnectionPool implements Closeable {
     // need to be updated in preparation for the next client.
     private final WeakHashMap<SQLiteConnection, AcquiredConnectionStatus> mAcquiredConnections =
             new WeakHashMap<>();
+
+    private static final int OPEN_FLAG_REOPEN_MASK =
+            SQLiteDatabase.OPEN_READONLY | SQLiteDatabase.NO_LOCALIZED_COLLATORS |
+            SQLiteDatabase.CREATE_IF_NECESSARY;
 
     /**
      * Connection flag: Read-only.
@@ -310,7 +315,7 @@ public final class SQLiteConnectionPool implements Closeable {
                 }
             }
 
-            if (mConfiguration.openFlags != configuration.openFlags ||
+            if (((mConfiguration.openFlags ^ configuration.openFlags) & OPEN_FLAG_REOPEN_MASK) != 0 ||
                     !DatabaseUtils.objectEquals(mConfiguration.vfsName, configuration.vfsName)) {
                 // If we are changing open flags and WAL mode at the same time, then
                 // we have no choice but to close the primary connection beforehand
@@ -563,7 +568,7 @@ public final class SQLiteConnectionPool implements Closeable {
             connection.close(); // might throw
         } catch (RuntimeException ex) {
             Log.e(TAG, "Failed to close connection, its fate is now in the hands "
-                    + "of the merciful GC: " + connection, ex);
+                    + "of the merciful GC: " + connection + ex.getMessage());
         }
     }
 
@@ -1045,15 +1050,48 @@ public final class SQLiteConnectionPool implements Closeable {
         mConnectionWaiterPool = waiter;
     }
 
-    /*package*/ SQLiteTrace getTraceCallback() {
+    SQLiteChangeListener getChangeListener() {
+        return mChangeListener;
+    }
+
+    void setChangeListener(SQLiteChangeListener listener, boolean notifyRowId) {
+        boolean notifyEnabled = (listener != null);
+        if (!notifyEnabled)
+            notifyRowId = false;
+
+        synchronized (mLock) {
+            if (mConfiguration.updateNotificationEnabled != notifyEnabled ||
+                    mConfiguration.updateNotificationRowID != notifyRowId) {
+                mConfiguration.updateNotificationEnabled = notifyEnabled;
+                mConfiguration.updateNotificationRowID = notifyRowId;
+
+                closeExcessConnectionsAndLogExceptionsLocked();
+                reconfigureAllConnectionsLocked();
+            }
+
+            mChangeListener = listener;
+        }
+    }
+
+    void notifyChanges(String dbName, String table,
+            long[] insertIds, long[] updateIds, long[] deleteIds) {
+        SQLiteDatabase db = mDB.get();
+        SQLiteChangeListener listener = mChangeListener;
+
+        if (listener == null || db == null)
+            return;
+        listener.onChange(db, dbName, table, insertIds, updateIds, deleteIds);
+    }
+
+    SQLiteTrace getTraceCallback() {
         return mTraceCallback;
     }
 
-    /*package*/ void setTraceCallback(SQLiteTrace callback) {
+    void setTraceCallback(SQLiteTrace callback) {
         mTraceCallback = callback;
     }
 
-    /*package*/ void traceExecute(String sql, int type, long time) {
+    void traceExecute(String sql, int type, long time) {
         SQLiteDatabase db = mDB.get();
         SQLiteTrace trace = mTraceCallback;
 
@@ -1062,11 +1100,11 @@ public final class SQLiteConnectionPool implements Closeable {
         trace.onSQLExecuted(db, sql, type, time);
     }
 
-    /*package*/ SQLiteCheckpointListener getCheckpointListener() {
+    SQLiteCheckpointListener getCheckpointListener() {
         return mCheckpointListener;
     }
 
-    /*package*/ void setCheckpointListener(SQLiteCheckpointListener listener) {
+    void setCheckpointListener(SQLiteCheckpointListener listener) {
         SQLiteDatabase db = mDB.get();
 
         if (mCheckpointListener != null)

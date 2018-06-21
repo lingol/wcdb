@@ -1,3 +1,50 @@
+## v1.0.6
+
+#### iOS/macOS
+
+It's the first release for WCDB Swift, which contains exactly the same features as the ObjC version, including:
+
+* Object-Relational-Mapping based on Swift 4.0 `Codable` protocol
+* WCDB Integrated Language Query
+* Multithreading safety and concurrency
+* Encryption based on SQLCipher
+* Protection for SQL injection
+* Full text search
+* Corruption recovery
+* ...
+
+For further information, please check tutorial on wiki.
+
+#### Android
+
+* Migrate to gradle plugin 3.0.0, target API 26, and minimal API 14.
+* Support NDK r16, change default toolchain to clang.
+* Various bug fixes.
+
+## v1.0.5
+
+#### iOS/macOS
+
+* Builtin full-text search support for ORM.
+```objc
+WCTProperty *tableProperty = WCTSampleFTSData.PropertyNamed(tableNameFTS).match("Eng*")];
+
+[databaseFTS getObjectsOfClass:WCTSampleFTSData.class fromTable:tableNameFTS where:tableProperty.match("Eng*")];
+```
+* Support read-only databases.
+* Some minor bug fixes and code refactor.
+
+#### Android
+
+* Optimize asynchronous checkpointer, greatly improve write performance with WAL and asynchronous checkpointing.
+```java
+SQLiteDatabase db = SQLiteDatabase.openOrCreateDatabaseInWalMode(...);
+db.setAsyncCheckpointEnabled(true);
+```
+* Add benchmark for asynchronous checkpointer.
+* Add connection pooling friendly interface `SQLiteDatabase.setSynchronousMode()` to set database synchronization mode.
+* Enable `dbstat` virtual table while compiling.
+
 ## v1.0.4
 
 #### Repair Kit
@@ -5,7 +52,7 @@
 * Add `sqliterk_cancel` function to cancel ongoing output operations.
 * Add corresponding Java interface to cancel operations on Android.
 
-#### iOS
+#### iOS/macOS
 
 * Builtin `WCTColumnCoding` supports all `id<NSCoding>` objects now.
 * Compatible with iOS 11.
@@ -23,7 +70,7 @@ WCTDatabase* withoutPath = [[WCTDatabase alloc] initWithExistingTag:123];
 #### Android
 
 * Add asynchronous checkpointing support and custom checkpointing callback. This can
-improve performance in WAL mode.
+  improve performance in WAL mode.
 
 ```java
 SQLiteDatabase db = SQLiteDatabase.openOrCreateDatabaseInWalMode(...);
@@ -61,7 +108,7 @@ signal.cancel();
 
 * Fix INTEGER PRIMARY KEY columns not properly recovered.
 
-#### iOS
+#### iOS/macOS
 
 * Add `WCTColumnCoding` support for all `WCTValue`. Developers can use `id<WCTColumnCoding>` objects for WINQ and all interfaces.
 ```objc
@@ -93,7 +140,7 @@ NSDate *now = [NSDate date];
 
 ## v1.0.2
 
-#### iOS
+#### iOS/macOS
 
 * Performance optimization and benchmark. See Wiki page for details.
 * Change builtin `NSData` or `NSMutableData` column coding to raw data format. To be compatible with earlier versions, call `[WCTCompatible sharedCompatible].builtinNSDataColumnCodingCompatibleEnabled = YES`.
@@ -109,7 +156,7 @@ NSDate *now = [NSDate date];
 
 ## v1.0.1
 
-#### iOS
+#### iOS/macOS
 
 * Add CocoaPods support.
 * Add iOS 7 and macOS 10.9 support. Apps using WCDB can target iOS 7 now.
