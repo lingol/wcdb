@@ -18,6 +18,7 @@ package com.tencent.wcdb.database;
 
 
 import android.annotation.SuppressLint;
+import android.util.Pair;
 import android.util.Printer;
 
 import com.tencent.wcdb.BuildConfig;
@@ -154,7 +155,10 @@ public final class SQLiteConnection implements CancellationSignal.OnCancelListen
     private static native void nativeResetCancel(long connectionPtr, boolean cancelable);
     private static native void nativeSetKey(long connectionPtr, byte[] password);
     private static native void nativeSetWalHook(long connectionPtr);
-    private static native long nativeGetSQLiteHandle(long connectionPtr);
+    private static native long nativeWalCheckpoint(long connectionPtr, String dbName);
+    private static native long nativeSQLiteHandle(long connectionPtr, boolean acquire);
+    private static native void nativeSetUpdateNotification(long connectionPtr, boolean enabled,
+            boolean notifyRowId);
 
     // Password for encrypted database.
     private byte[] mPassword;
@@ -167,6 +171,7 @@ public final class SQLiteConnection implements CancellationSignal.OnCancelListen
 
     // Recurse count for getNativeHandle().
     private int mNativeHandleCount;
+
 
     private SQLiteConnection(SQLiteConnectionPool pool, SQLiteDatabaseConfiguration configuration,
             int connectionId, boolean primaryConnection, byte[] password, SQLiteCipherSpec cipher) {
@@ -182,7 +187,7 @@ public final class SQLiteConnection implements CancellationSignal.OnCancelListen
         mPreparedStatementCache = new PreparedStatementCache(mConfiguration.maxSqlCacheSize);
     }
 
-    /*package*/ long getNativeHandle(String operation) {
+    long getNativeHandle(String operation) {
         if (mConnectionPtr == 0)
             return 0;
 
@@ -192,11 +197,13 @@ public final class SQLiteConnection implements CancellationSignal.OnCancelListen
         }
 
         mNativeHandleCount++;
-        return nativeGetSQLiteHandle(mConnectionPtr);
+        return nativeSQLiteHandle(mConnectionPtr, true);
     }
 
-    /*package*/ void endNativeHandle(Exception ex) {
+    void endNativeHandle(Exception ex) {
         if (--mNativeHandleCount == 0 && mNativeOperation != null) {
+            nativeSQLiteHandle(mConnectionPtr, false);
+
             if (ex == null) {
                 mRecentOperations.endOperationDeferLog(mNativeOperation.mCookie);
                 // Don't log native operations for now. Drop return value.
@@ -261,11 +268,14 @@ public final class SQLiteConnection implements CancellationSignal.OnCancelListen
         setPageSize();
 
         // 4. Other initialization steps from original SQLiteConnection.
+        setReadOnlyFromConfiguration();
         setForeignKeyModeFromConfiguration();
         setWalModeFromConfiguration();
+        setSyncModeFromConfiguration();
         setJournalSizeLimit();
         setCheckpointStrategy();
         setLocaleFromConfiguration();
+        setUpdateNotificationFromConfiguration();
 
         // Register custom functions.
         final int functionCount = mConfiguration.customFunctions.size();
@@ -289,7 +299,7 @@ public final class SQLiteConnection implements CancellationSignal.OnCancelListen
     }
 
     private void setPageSize() {
-        if (!mConfiguration.isInMemoryDb() && !mIsReadOnlyConnection) {
+        if (!mConfiguration.isInMemoryDb()) {
             String pragmaCmd;
             long newValue;
 
@@ -364,33 +374,19 @@ public final class SQLiteConnection implements CancellationSignal.OnCancelListen
 
     private void setWalModeFromConfiguration() {
         if (!mConfiguration.isInMemoryDb() && !mIsReadOnlyConnection) {
+            String journalMode;
             if ((mConfiguration.openFlags & SQLiteDatabase.ENABLE_WRITE_AHEAD_LOGGING) != 0) {
-                setJournalMode("WAL");
-                setSyncMode(SQLiteGlobal.walSyncMode);
+                journalMode = "WAL";
             } else {
-                setJournalMode(SQLiteGlobal.defaultJournalMode);
-                setSyncMode(SQLiteGlobal.defaultSyncMode);
+                journalMode = SQLiteGlobal.defaultJournalMode;
             }
+            setJournalMode(journalMode);
         }
     }
 
-    private void setSyncMode(String newValue) {
-        String value = executeForString("PRAGMA synchronous", null, null);
-        if (!canonicalizeSyncMode(value).equalsIgnoreCase(
-                canonicalizeSyncMode(newValue))) {
-            execute("PRAGMA synchronous=" + newValue, null, null);
-        }
-    }
-
-    private static String canonicalizeSyncMode(String value) {
-        if (value.equals("0")) {
-            return "OFF";
-        } else if (value.equals("1")) {
-            return "NORMAL";
-        } else if (value.equals("2")) {
-            return "FULL";
-        }
-        return value;
+    private void setSyncModeFromConfiguration() {
+        int syncMode = mConfiguration.synchronousMode;
+        execute("PRAGMA synchronous=" + syncMode, null, null);
     }
 
     private void setJournalMode(String newValue) {
@@ -473,6 +469,25 @@ public final class SQLiteConnection implements CancellationSignal.OnCancelListen
         }
     }
 
+    private void setReadOnlyFromConfiguration() {
+        // Currently, read-only flag can only be changed via reopening connection, so no operation
+        // needed for read/write connections.
+        if (mIsReadOnlyConnection) {
+            execute("PRAGMA query_only = 1", null, null);
+        }
+    }
+
+    @SuppressWarnings("unused")
+    private void notifyChange(String db, String table, long[] insertIds, long[] updateIds, long[] deleteIds) {
+        mPool.notifyChanges(db, table, insertIds, updateIds, deleteIds);
+    }
+
+    private void setUpdateNotificationFromConfiguration() {
+        nativeSetUpdateNotification(mConnectionPtr,
+                mConfiguration.updateNotificationEnabled,
+                mConfiguration.updateNotificationRowID);
+    }
+
     // Called by SQLiteConnectionPool only.
     void reconfigure(SQLiteDatabaseConfiguration configuration) {
         mOnlyAllowReadOnlyOperations = false;
@@ -487,13 +502,18 @@ public final class SQLiteConnection implements CancellationSignal.OnCancelListen
         }
 
         // Remember what changed.
+        int openFlagsChanged = configuration.openFlags ^ mConfiguration.openFlags;
+        boolean walModeChanged = (openFlagsChanged & SQLiteDatabase.ENABLE_WRITE_AHEAD_LOGGING) != 0;
         boolean foreignKeyModeChanged = configuration.foreignKeyConstraintsEnabled
                 != mConfiguration.foreignKeyConstraintsEnabled;
-        boolean walModeChanged = ((configuration.openFlags ^ mConfiguration.openFlags)
-                & SQLiteDatabase.ENABLE_WRITE_AHEAD_LOGGING) != 0;
         boolean localeChanged = !configuration.locale.equals(mConfiguration.locale);
         boolean checkpointStrategyChanged = configuration.customWALHookEnabled
                 != mConfiguration.customWALHookEnabled;
+        boolean synchronousChanged = configuration.synchronousMode
+                != mConfiguration.synchronousMode;
+        boolean updateNotificationChanged =
+                (configuration.updateNotificationEnabled != mConfiguration.updateNotificationEnabled) ||
+                (configuration.updateNotificationRowID != mConfiguration.updateNotificationRowID);
 
         // Update configuration parameters.
         mConfiguration.updateParametersFrom(configuration);
@@ -511,6 +531,11 @@ public final class SQLiteConnection implements CancellationSignal.OnCancelListen
             setWalModeFromConfiguration();
         }
 
+        // Update synchronous mode.
+        if (synchronousChanged) {
+            setSyncModeFromConfiguration();
+        }
+
         // Update checkpoint strategy. This must be done after setting WAL mode.
         if (checkpointStrategyChanged) {
             setCheckpointStrategy();
@@ -519,6 +544,11 @@ public final class SQLiteConnection implements CancellationSignal.OnCancelListen
         // Update locale.
         if (localeChanged) {
             setLocaleFromConfiguration();
+        }
+
+        // Update notification.
+        if (updateNotificationChanged) {
+            setUpdateNotificationFromConfiguration();
         }
     }
 
@@ -939,6 +969,16 @@ public final class SQLiteConnection implements CancellationSignal.OnCancelListen
         }
     }
 
+    public Pair<Integer, Integer> walCheckpoint(String dbName) {
+        if (dbName == null || dbName.isEmpty())
+            dbName = "main";
+
+        long result = nativeWalCheckpoint(mConnectionPtr, dbName);
+        int walPages = (int) (result >> 32);
+        int checkpointedPages = (int) (result & 0xFFFFFFFFL);
+        return new Pair<>(walPages, checkpointedPages);
+    }
+
     /*package*/ PreparedStatement acquirePreparedStatement(String sql) {
         PreparedStatement statement = mPreparedStatementCache.get(sql);
         boolean skipCache = false;
@@ -1108,8 +1148,7 @@ public final class SQLiteConnection implements CancellationSignal.OnCancelListen
     }
 
     private void applyBlockGuardPolicy(PreparedStatement statement) {
-        if (!mConfiguration.isInMemoryDb()) {
-        }
+        // do nothing
     }
 
     /**
@@ -1526,8 +1565,10 @@ public final class SQLiteConnection implements CancellationSignal.OnCancelListen
 
             synchronized (mOperations) {
                 Operation operation = getOperationLocked(cookie);
-                result = endOperationDeferLogLocked(operation);
+                if (operation == null)
+                    return false;
 
+                result = endOperationDeferLogLocked(operation);
                 sql = operation.mSql;
                 kind = operation.mKind;
                 type = operation.mType;
@@ -1542,7 +1583,8 @@ public final class SQLiteConnection implements CancellationSignal.OnCancelListen
         public void logOperation(int cookie, String detail) {
             synchronized (mOperations) {
                 final Operation operation = getOperationLocked(cookie);
-                logOperationLocked(operation, detail);
+                if (operation != null)
+                    logOperationLocked(operation, detail);
             }
         }
 

@@ -17,6 +17,7 @@
 package com.tencent.wcdb.database;
 
 import android.os.Process;
+import android.util.Pair;
 
 import com.tencent.wcdb.BuildConfig;
 import com.tencent.wcdb.CursorWindow;
@@ -793,6 +794,15 @@ public final class SQLiteSession {
         }
     }
 
+    public Pair<Integer, Integer> walCheckpoint(String dbName, int connectionFlags) {
+        acquireConnection(null, connectionFlags, null);
+        try {
+            return mConnection.walCheckpoint(dbName);
+        } finally {
+            releaseConnection();
+        }
+    }
+
 
     /**
      * Performs special reinterpretation of certain SQL statements such as "BEGIN",
@@ -887,10 +897,10 @@ public final class SQLiteSession {
 
     /*package*/ void releasePreparedStatement(SQLiteConnection.PreparedStatement statement) {
         // acquirePreparedStatement keeps connection as well, so we are responsible to release it.
-        if (mConnection != null)
+        if (mConnection != null) {
             mConnection.releasePreparedStatement(statement);
-
-        releaseConnection();
+            releaseConnection();
+        }
     }
 
     private void throwIfNoTransaction() {

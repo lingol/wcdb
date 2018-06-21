@@ -53,6 +53,13 @@ public final class SQLiteDatabaseConfiguration {
     public final String label;
 
     /**
+     * Name of VFS used to open connections, or null to use default VFS.
+     *
+     * Default is null.
+     */
+    public String vfsName;
+
+    /**
      * The flags used to open the database.
      */
     public int openFlags;
@@ -67,31 +74,36 @@ public final class SQLiteDatabaseConfiguration {
 
     /**
      * The database locale.
-     *
      * Default is the value returned by {@link Locale#getDefault()}.
      */
     public Locale locale;
 
     /**
      * True if foreign key constraints are enabled.
-     *
      * Default is false.
      */
     public boolean foreignKeyConstraintsEnabled;
 
     /**
      * True if custom WAL hook, including async-checkpoint, is enabled.
-     *
      * Default is false.
      */
     public boolean customWALHookEnabled;
 
     /**
-     * Name of VFS used to open connections, or null to use default VFS.
-     *
-     * Default is null.
+     * Synchronize mode to be used.
      */
-    public String vfsName;
+    public int synchronousMode;
+
+    /**
+     * True if SQLite should call registered callback when database is updated.
+     */
+    public boolean updateNotificationEnabled;
+
+    /**
+     * True if update notifications should contain information about modified RowID.
+     */
+    public boolean updateNotificationRowID;
 
     /**
      * The custom functions to register.
@@ -116,6 +128,7 @@ public final class SQLiteDatabaseConfiguration {
         this.openFlags = openFlags;
 
         // Set default values for optional parameters.
+        synchronousMode = SQLiteDatabase.SYNCHRONOUS_FULL;
         maxSqlCacheSize = 25;
         locale = Locale.getDefault();
         vfsName = (openFlags & SQLiteDatabase.ENABLE_IO_TRACE) != 0 ? "vfslog" : null;
@@ -156,6 +169,9 @@ public final class SQLiteDatabaseConfiguration {
         locale = other.locale;
         foreignKeyConstraintsEnabled = other.foreignKeyConstraintsEnabled;
         customWALHookEnabled = other.customWALHookEnabled;
+        updateNotificationEnabled = other.updateNotificationEnabled;
+        updateNotificationRowID = other.updateNotificationRowID;
+        synchronousMode = other.synchronousMode;
         vfsName = other.vfsName;
         customFunctions.clear();
         customFunctions.addAll(other.customFunctions);

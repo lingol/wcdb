@@ -69,18 +69,9 @@ public final class SQLiteDatabase extends SQLiteClosable {
     private static final String TAG = "WCDB.SQLiteDatabase";
 
     static {
-        // To be compatible to frameworks which handle native library loading themselves,
-        // we do a simple test for whether native methods have been registered already.
-        try {
-            SQLiteGlobal.nativeTestJNIRegistration();
-        } catch (UnsatisfiedLinkError e) {
-            // If we reached here, native methods are not registered.
-            System.loadLibrary("wcdb");
-        }
+        // Ensure libmmdb.so is loaded.
+        SQLiteGlobal.loadLib();
     }
-    // Dummy static method to trigger class initialization.
-    // See [JLS 12.4.1](http://docs.oracle.com/javase/specs/jls/se7/html/jls-12.html#jls-12.4.1)
-    public static void loadLib() {}
 
     // Stores reference to all databases opened in the current process.
     // (The referent Object is not used at this time.)
@@ -192,6 +183,11 @@ public final class SQLiteDatabase extends SQLiteClosable {
     private static final String[] CONFLICT_VALUES = new String[]
             {"", " OR ROLLBACK ", " OR ABORT ", " OR FAIL ", " OR IGNORE ", " OR REPLACE "};
 
+    public static final int SYNCHRONOUS_OFF = 0;
+    public static final int SYNCHRONOUS_NORMAL = 1;
+    public static final int SYNCHRONOUS_FULL = 2;
+    public static final int SYNCHRONOUS_EXTRA = 3;
+
     /**
      * Maximum Length Of A LIKE Or GLOB Pattern
      * The pattern matching algorithm used in the default LIKE and GLOB implementation
@@ -242,12 +238,6 @@ public final class SQLiteDatabase extends SQLiteClosable {
     public static final int ENABLE_IO_TRACE = 0x00000100;
 
     /**
-     * Open flag: Flag for {@link #openDatabase} that indicates no backup for database files is
-     * done when corruption is detected.
-     */
-    public static final int NO_CORRUPTION_BACKUP = 0x00000200;
-
-    /**
      * Open flag: Flag for {@link #openDatabase} to create the database file if it does not
      * already exist.
      */
@@ -277,7 +267,7 @@ public final class SQLiteDatabase extends SQLiteClosable {
             DatabaseErrorHandler errorHandler) {
         mCursorFactory = cursorFactory;
         mErrorHandler = errorHandler != null ? errorHandler :
-                new DefaultDatabaseErrorHandler((openFlags & NO_CORRUPTION_BACKUP) != 0);
+                new DefaultDatabaseErrorHandler(true);
         mConfigurationLocked = new SQLiteDatabaseConfiguration(path, openFlags);
     }
 
@@ -925,8 +915,7 @@ public final class SQLiteDatabase extends SQLiteClosable {
             throw new IllegalArgumentException("file must not be null");
         }
 
-        boolean deleted = false;
-        deleted |= file.delete();
+        boolean deleted = file.delete();
         deleted |= new File(file.getPath() + "-journal").delete();
         deleted |= new File(file.getPath() + "-shm").delete();
         deleted |= new File(file.getPath() + "-wal").delete();
@@ -940,8 +929,12 @@ public final class SQLiteDatabase extends SQLiteClosable {
                     return candidate.getName().startsWith(prefix);
                 }
             };
-            for (File masterJournal : dir.listFiles(filter)) {
-                deleted |= masterJournal.delete();
+
+            File[] masterJournals = dir.listFiles(filter);
+            if (masterJournals != null) {
+                for (File masterJournal : masterJournals) {
+                    deleted |= masterJournal.delete();
+                }
             }
         }
         return deleted;
@@ -1921,6 +1914,17 @@ public final class SQLiteDatabase extends SQLiteClosable {
         }
     }
 
+    public Pair<Integer, Integer> walCheckpoint(String dbName, boolean blockWriting) {
+        acquireReference();
+        try {
+            int connectionFlag = blockWriting ?
+                    SQLiteConnectionPool.CONNECTION_FLAG_PRIMARY_CONNECTION_AFFINITY : 0;
+            return getThreadSession().walCheckpoint(dbName, connectionFlag);
+        } finally {
+            releaseReference();
+        }
+    }
+
     /**
      * Returns true if the database is opened as read only.
      *
@@ -2087,6 +2091,21 @@ public final class SQLiteDatabase extends SQLiteClosable {
     }
 
     /**
+     * Returns {@link SQLiteCheckpointListener} object previously set.
+     *
+     * @return callback object set to the database
+     */
+    public SQLiteCheckpointListener getCheckpointCallback() {
+        synchronized (mLock) {
+            throwIfNotOpenLocked();
+            if (!mConfigurationLocked.customWALHookEnabled)
+                return null;
+
+            return mConnectionPoolLocked.getCheckpointListener();
+        }
+    }
+
+    /**
      * Set callback object to be called on each commit in WAL mode.
      *
      * <p>Use this callback for customized WAL checkpoint operations for different situations an
@@ -2115,6 +2134,16 @@ public final class SQLiteDatabase extends SQLiteClosable {
 
             mConnectionPoolLocked.setCheckpointListener(callback);
         }
+    }
+
+    /**
+     * Returns whether asynchronous checkpointing is enabled.
+     *
+     * @return true if asynchronous checkpointing is enabled
+     */
+    public boolean getAsyncCheckpointEnabled() {
+        SQLiteCheckpointListener listener = getCheckpointCallback();
+        return (listener != null) && (listener instanceof SQLiteAsyncCheckpointer);
     }
 
     /**
@@ -2226,10 +2255,8 @@ public final class SQLiteDatabase extends SQLiteClosable {
             // make sure this database has NO attached databases because sqlite's write-ahead-logging
             // doesn't work for databases with attached databases
             if (mHasAttachedDbsLocked) {
-//                if (Log.isLoggable(TAG, Log.DEBUG)) {
                 Log.i(TAG, "this database: " + mConfigurationLocked.label
                         + " has attached databases. can't  enable WAL.");
-//                }
                 return false;
             }
 
@@ -2282,6 +2309,57 @@ public final class SQLiteDatabase extends SQLiteClosable {
             throwIfNotOpenLocked();
 
             return (mConfigurationLocked.openFlags & ENABLE_WRITE_AHEAD_LOGGING) != 0;
+        }
+    }
+
+    public int getSynchronousMode() {
+        synchronized (mLock) {
+            throwIfNotOpenLocked();
+
+            return mConfigurationLocked.synchronousMode;
+        }
+    }
+
+    public void setSynchronousMode(int mode) {
+        synchronized (mLock) {
+            throwIfNotOpenLocked();
+
+            final int oldMode = mConfigurationLocked.synchronousMode;
+            if (oldMode != mode) {
+                mConfigurationLocked.synchronousMode = mode;
+                try {
+                    mConnectionPoolLocked.reconfigure(mConfigurationLocked);
+                } catch (RuntimeException ex) {
+                    mConfigurationLocked.synchronousMode = oldMode;
+                    throw ex;
+                }
+            }
+        }
+    }
+
+    /** Returns the {@link SQLiteChangeListener} object bound to this database.
+     *
+     * @return {@link SQLiteChangeListener} object bound to this database.
+     * @see SQLiteChangeListener
+     * @see #setChangeListener(SQLiteChangeListener, boolean)
+     */
+    public SQLiteChangeListener getChangeListener() {
+        synchronized (mLock) {
+            throwIfNotOpenLocked();
+            return mConnectionPoolLocked.getChangeListener();
+        }
+    }
+
+    /**
+     * Bind a {@link SQLiteChangeListener} object for database change notifications.
+     *
+     * @param listener      listener to be set
+     * @param notifyRowId   whether RowIDs of each modified row should be reported
+     */
+    public void setChangeListener(SQLiteChangeListener listener, boolean notifyRowId) {
+        synchronized (mLock) {
+            throwIfNotOpenLocked();
+            mConnectionPoolLocked.setChangeListener(listener, notifyRowId);
         }
     }
 
@@ -2457,10 +2535,10 @@ public final class SQLiteDatabase extends SQLiteClosable {
                 SQLiteStatement prog = null;
                 try {
                     prog = compileStatement("PRAGMA " + p.first + ".integrity_check(1);");
-                    String rslt = prog.simpleQueryForString();
-                    if (!rslt.equalsIgnoreCase("ok")) {
+                    String result = prog.simpleQueryForString();
+                    if (!DatabaseUtils.objectEquals(result, "ok")) {
                         // integrity_checker failed on main or attached databases
-                        Log.e(TAG, "PRAGMA integrity_check on " + p.second + " returned: " + rslt);
+                        Log.e(TAG, "PRAGMA integrity_check on " + p.second + " returned: " + result);
                         return false;
                     }
                 } finally {
